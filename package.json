@@ -1,0 +1,19 @@
+{
+  "name": "fidelity-exporter",
+  "version": "1.0.0",
+  "description": "Browser automation library to export Fidelity portfolio positions as CSV",
+  "main": "index.js",
+  "bin": {
+    "fidelity-exporter": "./cli.js"
+  },
+  "scripts": {
+    "export": "node cli.js"
+  },
+  "keywords": ["fidelity", "portfolio", "positions", "csv", "export"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}
