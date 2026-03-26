@@ -1,88 +1,54 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * CLI wrapper for fidelity-exporter.
- *
- * Usage:
- *   node cli.js [--out <dir>] [--visible] [--timeout <ms>]
- *
- * Credentials are read from environment variables:
- *   FIDELITY_USERNAME
- *   FIDELITY_PASSWORD
- */
+const { program } = require('commander');
+const { FidelityExporter } = require('./index');
+require('dotenv').config();
 
-const { exportPositions } = require('./index');
+program
+  .name('fidelity-exporter')
+  .description('Robust Fidelity investment account exporter')
+  .version('1.0.0')
+  .option('-u, --username <user>', 'Fidelity username (or set FIDELITY_USERNAME)')
+  .option('-p, --password <pass>', 'Fidelity password (or set FIDELITY_PASSWORD)')
+  .option('-o, --out <dir>', 'Directory to save the CSV file', process.cwd())
+  .option('-v, --visible', 'Run in headed mode (useful for manual MFA)', false)
+  .option('-t, --timeout <ms>', 'Operation timeout in milliseconds', '60000')
+  .option('--debug', 'Save screenshot on failure to the output directory', false)
+  .action(async (options) => {
+    const username = options.username || process.env.FIDELITY_USERNAME;
+    const password = options.password || process.env.FIDELITY_PASSWORD;
 
-function parseArgs(argv) {
-  const args = argv.slice(2);
-  const opts = {};
-  for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case '--out':
-        opts.downloadDir = args[++i];
-        break;
-      case '--visible':
-        opts.headless = false;
-        break;
-      case '--timeout':
-        opts.timeout = parseInt(args[++i], 10);
-        break;
-      case '--help':
-      case '-h':
-        printUsage();
-        process.exit(0);
+    if (!username || !password) {
+      console.error('Error: username and password are required via flags or FIDELITY_USERNAME/FIDELITY_PASSWORD environment variables.');
+      process.exit(1);
     }
-  }
-  return opts;
-}
 
-function printUsage() {
-  console.log(`
-fidelity-exporter — download your Fidelity positions as CSV
-
-Usage:
-  FIDELITY_USERNAME=<user> FIDELITY_PASSWORD=<pass> node cli.js [options]
-
-Options:
-  --out <dir>       Directory to save the CSV file (default: current directory)
-  --visible         Run with a visible browser window (useful for MFA)
-  --timeout <ms>    Action/navigation timeout in milliseconds (default: 60000)
-  --help, -h        Show this help text
-
-The downloaded CSV is also printed to stdout so you can pipe it elsewhere.
-`.trim());
-}
-
-async function main() {
-  const cliOpts = parseArgs(process.argv);
-
-  const username = process.env.FIDELITY_USERNAME;
-  const password = process.env.FIDELITY_PASSWORD;
-
-  if (!username || !password) {
-    console.error('Error: FIDELITY_USERNAME and FIDELITY_PASSWORD environment variables are required.');
-    process.exit(1);
-  }
-
-  console.error('Launching browser and logging in to Fidelity…');
-
-  try {
-    const { filePath, content } = await exportPositions({
+    const exporter = new FidelityExporter({
       username,
       password,
-      ...cliOpts,
+      outDir: options.out,
+      headless: !options.visible,
+      visible: !!options.visible,
+      timeout: parseInt(options.timeout, 10),
+      debug: options.debug,
+      closeOnFinish: !options.visible
     });
 
-    console.error(`Positions saved to: ${filePath}`);
-    process.stdout.write(content);
-  } catch (err) {
-    console.error(`Export failed: ${err.message}`);
-    if (process.env.DEBUG) {
-      console.error(err.stack);
+    try {
+      console.error(`[FidelityExporter] Starting export positions action...`);
+      const { filePath, content } = await exporter.exportPositions();
+      
+      console.error(`[FidelityExporter] Positions saved to: ${filePath}`);
+      // Send result to stdout so users can pipe to another tool or grep
+      process.stdout.write(content);
+    } catch (err) {
+      console.error(`[FidelityExporter] Export failed: ${err.message}`);
+      if (options.debug) {
+        console.error(err.stack);
+      }
+      process.exit(1);
     }
-    process.exit(1);
-  }
-}
+  });
 
-main();
+program.parse(process.argv);

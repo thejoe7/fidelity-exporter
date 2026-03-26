@@ -1,19 +1,21 @@
 {
   "name": "fidelity-exporter",
   "version": "1.0.0",
-  "description": "Browser automation library to export Fidelity portfolio positions as CSV",
+  "description": "Robust Fidelity investment account exporter",
   "main": "index.js",
   "bin": {
-    "fidelity-exporter": "./cli.js"
+    "fidelity-exporter": "cli.js"
   },
   "scripts": {
-    "export": "node cli.js"
+    "start": "node cli.js",
+    "test:stealth": "node tests/stealth-check.js"
   },
-  "keywords": ["fidelity", "portfolio", "positions", "csv", "export"],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.42.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "commander": "^12.0.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.22.4"
   }
 }
