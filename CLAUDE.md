@@ -2,31 +2,62 @@
 
 ## Project Overview
 
-`fidelity-exporter` is a Node.js CLI tool and library that uses Playwright browser automation to log into Fidelity's website and export portfolio positions as a CSV file. It handles the full login flow including MFA/OTP challenges and splash screens.
+`fidelity-exporter` is a Node.js CLI tool and library that uses Playwright browser automation to log into Fidelity's website and export portfolio positions as a CSV file. It handles the full login flow including MFA/OTP challenges and interstitial splash screens. Sessions are persisted to avoid MFA prompts on subsequent runs.
 
 ## Repository Structure
 
 ```
 fidelity-exporter/
-├── index.js          # Core library — exportPositions() and helpers
-├── cli.js            # CLI entry point — parses args, reads env vars, calls index.js
-├── package.json      # Project metadata, bin entry, single dependency (playwright)
-└── package-lock.json # Locked dependency versions
+├── cli.js                          # CLI entry point — parses args, reads env vars
+├── index.js                        # FidelityExporter class — main orchestrator
+├── core/
+│   ├── FidelityBrowserFactory.js   # Browser lifecycle, stealth config, session persistence
+│   └── FidelityAuthManager.js      # Login flow, MFA detection, interstitial dismissal
+├── actions/
+│   ├── FidelityAction.js           # Abstract base class (command pattern)
+│   └── ExportPositionsAction.js    # Navigates to Positions, triggers CSV download
+├── tests/
+│   └── stealth-check.js            # Smoke test for bot detection evasion
+├── package.json
+└── package-lock.json
 ```
 
-No build step. No TypeScript. No tests. CommonJS modules (`require`/`module.exports`).
+No build step. No TypeScript. CommonJS modules (`require`/`module.exports`).
 
-## Key Functions
+## Key Components
 
-### `index.js`
-- **`exportPositions(options)`** — Main entry point. Launches Chromium, logs in, navigates to Positions, triggers download, returns `{ filePath, content }`.
-- **`handlePostLoginChallenges(page, timeout)`** — Polling loop (1.5s interval) that auto-dismisses MFA prompts, OTP inputs, and splash screens. Waits for user input on OTP if running in headed mode.
-- **`triggerDownload(page, timeout)`** — Locates the CSV download button using a fallback selector chain (aria-label → custom element class → button text → data-testid → accessibility role). Returns a Playwright `Download` handle.
+### `index.js` — `FidelityExporter`
+- **`new FidelityExporter(options)`** — Accepts `username`, `password`, `downloadDir`, `headless`, `timeout`.
+- **`run()`** — Orchestrates browser init → auth → action execution → cleanup. Always closes browser in `finally`.
+
+### `core/FidelityBrowserFactory.js`
+- Launches a **persistent** Chromium context (not ephemeral) with session stored at `~/.config/fidelity-exporter/session`.
+- Applies `playwright-extra` with `puppeteer-extra-plugin-stealth` to avoid Fidelity's bot detection (Akamai/PerimeterX fingerprinting).
+- Realistic User-Agent (Chrome 124 on macOS), viewport 1280×900, `acceptDownloads: true`.
+
+### `core/FidelityAuthManager.js`
+- Navigates to Fidelity's portfolio summary URL and checks if already authenticated (session reuse).
+- If login required: fills username/password with 100ms keystroke delays, submits form.
+- Uses resilient selector chains for login fields (ID, name, role-based, wildcard) because Fidelity's DOM changes.
+- **MFA handling**: Detects MFA via URL patterns (`/mfa`, `/challenge`) or page text.
+  - **Headless mode**: Throws an error instructing the user to re-run with `--visible`.
+  - **Headed mode**: Waits up to 300s for the user to complete the challenge manually.
+- Auto-dismisses interstitials ("Skip for now", "No thanks", "Continue").
+
+### `actions/FidelityAction.js`
+- Abstract base class. Subclasses implement `execute(page)`.
+- **`ensurePage(page, targetUrl, fragment)`** — SPA-aware navigation: tries clicking a tab/link first, falls back to hard navigation, waits for URL fragment match.
+- **`triggerDownload(page, buttonSelector)`** — Uses `Promise.all` with `page.waitForEvent('download')` to avoid race conditions. Returns `{ filePath, content }`.
+
+### `actions/ExportPositionsAction.js`
+- Navigates to the Positions page, waits for content to render.
+- Opens "More" / "Available Actions" menu if present, then clicks Download.
+- Returns `{ filePath, content }` where `content` is the CSV string.
 
 ### `cli.js`
 - Reads credentials from `FIDELITY_USERNAME` / `FIDELITY_PASSWORD` env vars — never from CLI args.
 - Outputs CSV content to **stdout**, file path to **stderr**.
-- `DEBUG=1` env var enables full stack traces on errors.
+- Options: `--out <dir>`, `--visible`, `--timeout <ms>`, `--debug`.
 
 ## Running the Tool
 
@@ -39,18 +70,22 @@ npx playwright install chromium
 FIDELITY_USERNAME=user@example.com FIDELITY_PASSWORD=secret node cli.js
 
 # Options
-node cli.js --out ./downloads   # Save CSV to specific directory
-node cli.js --visible           # Show browser window (useful for MFA debugging)
-node cli.js --timeout 120000    # Custom timeout in ms (default: 60000)
+node cli.js --out ./downloads     # Save CSV to specific directory
+node cli.js --visible             # Show browser window (required for MFA in headless)
+node cli.js --timeout 120000      # Custom timeout in ms (default: 60000)
+node cli.js --debug               # Enable verbose debug output
 node cli.js --help
+
+# Smoke test stealth (bot detection check)
+npm run test:stealth
 ```
 
 ## Programmatic Usage
 
 ```javascript
-const { exportPositions } = require('./index');
+const FidelityExporter = require('./index');
 
-const result = await exportPositions({
+const exporter = new FidelityExporter({
   username: 'user@fidelity.com',
   password: 'secret',
   downloadDir: './downloads',  // optional, defaults to system temp
@@ -58,39 +93,40 @@ const result = await exportPositions({
   timeout: 60000               // optional, default 60000ms
 });
 
+const result = await exporter.run();
 console.log(result.filePath);  // absolute path to saved CSV
 console.log(result.content);   // CSV string
 ```
 
-## Browser Automation Conventions
+## Selector Strategy
 
-- Chromium is launched with `--disable-blink-features=AutomationControlled` and a realistic User-Agent to avoid bot detection.
-- Viewport is fixed at 1280×900.
-- Downloads are enabled via `acceptDownloads: true` on the browser context.
-- Form submissions use `Promise.all([page.waitForNavigation(), page.click()])` to avoid race conditions.
-- All async waits use `waitForSelector` with `{ state: 'visible' }` before interacting.
+Fidelity's frontend uses custom web components (`pvd-*`, `ap143-*`) and changes the DOM frequently. Always use **fallback chains** rather than a single selector. The ExportPositionsAction fallback order is:
 
-## Selector Strategy (triggerDownload)
-
-The download button selector is brittle by nature — Fidelity's frontend changes. The current fallback chain is:
-1. `[aria-label*="Download"]`
-2. Custom element class selectors specific to Fidelity's component library
-3. Button text matching
-4. `[data-testid]` attributes
+1. `[pvd-link-name*="Download All Positions"]`
+2. Custom Fidelity component selectors (`pvd-*`, `ap143-*`)
+3. ARIA labels (`[aria-label*="Download"]`)
+4. Button/link text matching
 5. Accessibility role fallback
 
-When updating selectors, maintain this fallback chain pattern rather than relying on a single selector.
+When adding new actions, follow the same pattern. Prefer `page.getByRole()` and `page.getByLabel()` (accessibility-grounded) over brittle CSS class selectors.
+
+## Session Persistence
+
+Sessions are stored at `~/.config/fidelity-exporter/session` (Playwright persistent context). This preserves cookies, IndexedDB, and "Trusted Device" tokens across runs, reducing MFA frequency. If a session appears broken, delete that directory and re-authenticate with `--visible`.
 
 ## Error Handling
 
-- Validates username/password are provided before launching browser.
+- Credentials are validated before the browser launches.
 - Browser is always closed in a `finally` block.
-- Errors bubble up with descriptive messages. Set `DEBUG=1` for full stack traces.
+- Errors surface with descriptive messages. Use `--debug` for verbose output.
+- MFA in headless mode throws immediately with instructions to use `--visible`.
 
 ## What Not To Do
 
+- Do not accept credentials as CLI arguments — env vars only.
 - Do not add a build step or transpile to TypeScript — keep it plain JS.
-- Do not add a test framework without a clear testing strategy for browser automation (mocking Playwright is not valuable here).
-- Do not store credentials in code or config files — always use env vars.
+- Do not mock Playwright in tests — mocked browser tests do not catch selector regressions.
+- Do not store credentials in code or config files.
 - Do not switch from CommonJS to ESM without verifying Playwright compatibility.
-- Do not hardcode file paths for the Fidelity website — use the existing navigation flow in case URLs change.
+- Do not hardcode Fidelity page URLs outside of the auth/action classes — they may change.
+- Do not rely on a single CSS selector for any Fidelity interaction — always use fallback chains.
