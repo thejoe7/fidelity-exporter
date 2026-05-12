@@ -12,7 +12,8 @@ fidelity-exporter/
 ├── index.js                        # FidelityExporter class — main orchestrator
 ├── core/
 │   ├── FidelityBrowserFactory.js   # Browser lifecycle, stealth config, session persistence
-│   └── FidelityAuthManager.js      # Login flow, MFA detection, interstitial dismissal
+│   ├── FidelityAuthManager.js      # Login flow, MFA detection, interstitial dismissal
+│   └── FidelityCredentials.js      # Loads Fidelity credentials from env/.env
 ├── actions/
 │   ├── FidelityAction.js           # Abstract base class (command pattern)
 │   └── ExportPositionsAction.js    # Navigates to Positions, triggers CSV download
@@ -27,8 +28,8 @@ No build step. No TypeScript. CommonJS modules (`require`/`module.exports`).
 ## Key Components
 
 ### `index.js` — `FidelityExporter`
-- **`new FidelityExporter(options)`** — Accepts `username`, `password`, `downloadDir`, `headless`, `timeout`.
-- **`run()`** — Orchestrates browser init → auth → action execution → cleanup. Always closes browser in `finally`.
+- **`new FidelityExporter(options)`** — Accepts `username`, `password`, `envFile`, `downloadDir`, `headless`, `timeout`, `manualLogin`, and `keepOpen`.
+- **`exportPositions()`** — Orchestrates browser init → auth → action execution → cleanup. Closes the browser in `finally` unless `keepOpen` is set.
 
 ### `core/FidelityBrowserFactory.js`
 - Launches a **persistent** Chromium context (not ephemeral) with session stored at `~/.config/fidelity-exporter/session`.
@@ -41,7 +42,8 @@ No build step. No TypeScript. CommonJS modules (`require`/`module.exports`).
 - Uses resilient selector chains for login fields (ID, name, role-based, wildcard) because Fidelity's DOM changes.
 - **MFA handling**: Detects MFA via URL patterns (`/mfa`, `/challenge`) or page text.
   - **Headless mode**: Throws an error instructing the user to re-run with `--visible`.
-  - **Headed mode**: Waits up to 300s for the user to complete the challenge manually.
+  - **Headed mode**: Waits up to 600s for the user to complete the challenge manually.
+- Supports manual login with `--visible --manual-login` when credentials are not provided to the process.
 - Auto-dismisses interstitials ("Skip for now", "No thanks", "Continue").
 
 ### `actions/FidelityAction.js`
@@ -52,12 +54,14 @@ No build step. No TypeScript. CommonJS modules (`require`/`module.exports`).
 ### `actions/ExportPositionsAction.js`
 - Navigates to the Positions page, waits for content to render.
 - Opens "More" / "Available Actions" menu if present, then clicks Download.
+- Saves files as `fidelity-positions-YYYY-MM-DD.csv` using the Pacific date, with numeric suffixes to preserve same-day reruns.
 - Returns `{ filePath, content }` where `content` is the CSV string.
 
 ### `cli.js`
-- Reads credentials from `FIDELITY_USERNAME` / `FIDELITY_PASSWORD` env vars — never from CLI args.
+- Reads credentials from explicit options, `FIDELITY_USERNAME` / `FIDELITY_PASSWORD`, or `.env`; never from CLI args.
 - Outputs CSV content to **stdout**, file path to **stderr**.
-- Options: `--out <dir>`, `--visible`, `--timeout <ms>`, `--debug`.
+- Waits for manual login in visible mode when credentials are not provided.
+- Options: `--out <dir>`, `--visible`, `--timeout <ms>`, `--env-file <path>`, `--manual-login`, `--keep-open`, `--debug`.
 
 ## Running the Tool
 
@@ -68,10 +72,13 @@ npx playwright install chromium
 
 # Run
 FIDELITY_USERNAME=user@example.com FIDELITY_PASSWORD=secret node cli.js
+node cli.js                         # Reads FIDELITY_USERNAME/FIDELITY_PASSWORD from .env when present
 
 # Options
 node cli.js --out ./downloads     # Save CSV to specific directory
 node cli.js --visible             # Show browser window (required for MFA in headless)
+node cli.js --env-file ./fidelity.env  # Load credentials from a specific env file
+node cli.js --visible --manual-login  # Log in manually without env credentials
 node cli.js --timeout 120000      # Custom timeout in ms (default: 60000)
 node cli.js --debug               # Enable verbose debug output
 node cli.js --help
@@ -83,17 +90,16 @@ npm run test:stealth
 ## Programmatic Usage
 
 ```javascript
-const FidelityExporter = require('./index');
+const { FidelityExporter } = require('./index');
 
 const exporter = new FidelityExporter({
-  username: 'user@fidelity.com',
-  password: 'secret',
+  envFile: './.env',
   downloadDir: './downloads',  // optional, defaults to system temp
   headless: true,              // optional, default true
   timeout: 60000               // optional, default 60000ms
 });
 
-const result = await exporter.run();
+const result = await exporter.exportPositions();
 console.log(result.filePath);  // absolute path to saved CSV
 console.log(result.content);   // CSV string
 ```
@@ -117,7 +123,7 @@ Sessions are stored at `~/.config/fidelity-exporter/session` (Playwright persist
 ## Error Handling
 
 - Credentials are validated before the browser launches.
-- Browser is always closed in a `finally` block.
+- Browser is closed in a `finally` block unless `--keep-open` / `keepOpen` is set.
 - Errors surface with descriptive messages. Use `--debug` for verbose output.
 - MFA in headless mode throws immediately with instructions to use `--visible`.
 

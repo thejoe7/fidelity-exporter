@@ -8,6 +8,7 @@ const { FidelityAction } = require('./FidelityAction');
 class ExportPositionsAction extends FidelityAction {
   constructor(options = {}) {
     super(options);
+    this.options.exportFilePrefix = this.options.exportFilePrefix || 'fidelity-positions';
     this.positionsUrl = 'https://digital.fidelity.com/ftgw/digital/portfolio/positions';
     this.positionsFragment = '/positions';
   }
@@ -21,7 +22,7 @@ class ExportPositionsAction extends FidelityAction {
     
     // Step 1: Navigate to the Positions page
     try {
-        console.log(`[ExportPositions] Navigating to: ${this.positionsUrl}`);
+        console.error(`[ExportPositions] Navigating to: ${this.positionsUrl}`);
         await this.ensurePage(page, this.positionsUrl, this.positionsFragment);
     } catch (err) {
         console.error(`[ExportPositions] Navigation failed: ${err.message}. Checking if already on page...`);
@@ -34,7 +35,7 @@ class ExportPositionsAction extends FidelityAction {
     // Use a robust indicator (the summary table)
     await page.waitForFunction(
       () => {
-        const body = document.body.innerText;
+        const body = document.body?.innerText || '';
         return body.includes('Symbol') || body.includes('Quantity') || body.includes('positions');
       },
       { timeout: this.options.timeout }
@@ -58,6 +59,8 @@ class ExportPositionsAction extends FidelityAction {
 
     const downloadSelectors = [
       'a[pvd-link-name*="Download All Positions"]',
+      'button:has-text("Download All Positions")',
+      'a:has-text("Download All Positions")',
       'pvd-list-item:has-text("Download")',
       'button:has-text("Download")',
       'a:has-text("Download")',
@@ -103,8 +106,20 @@ class ExportPositionsAction extends FidelityAction {
 
     // Fallback: If no dedicated download button works, try getting by role
     try {
-        const result = await this.triggerDownload(page, page.getByRole('button', { name: /download/i }).first());
-        return result;
+      const roleCandidates = [
+        page.getByRole('button', { name: /download/i }).first(),
+        page.getByRole('link', { name: /download/i }).first(),
+        page.getByRole('menuitem', { name: /download/i }).first(),
+        page.getByText(/Download All Positions/i).first(),
+      ];
+
+      for (const candidate of roleCandidates) {
+        if (await candidate.isVisible({ timeout: 2000 }).catch(() => false)) {
+          return await this.triggerDownload(page, candidate);
+        }
+      }
+
+      throw new Error('No role-based download target was visible.');
     } catch (err) {
         throw new Error(`Export positions failed after all attempts: ${lastError?.message || err.message}`);
     }

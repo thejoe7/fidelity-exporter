@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node cli.js",
+    "test": "node --test tests/*.test.js",
     "test:stealth": "node tests/stealth-check.js"
   },
   "dependencies": {

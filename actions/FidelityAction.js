@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 /**
  * Base class for all Fidelity actions (ExportPositions, Statements, etc.)
@@ -10,9 +11,9 @@ const path = require('path');
 class FidelityAction {
   constructor(options = {}) {
     this.options = {
-      downloadDir: options.outDir || process.cwd(),
       timeout: options.timeout || 60000,
-      ...options
+      ...options,
+      downloadDir: options.downloadDir || options.outDir || os.tmpdir()
     };
   }
 
@@ -70,12 +71,14 @@ class FidelityAction {
   /**
    * Universal helper for triggering a download and capturing the file.
    */
-  async triggerDownload(page, buttonSelector) {
-    console.error(`[FidelityAction] Triggering download using selector: ${buttonSelector}`);
-    const el = page.locator(buttonSelector).first();
+  async triggerDownload(page, target) {
+    const isSelector = typeof target === 'string';
+    const label = isSelector ? target : 'locator';
+    console.error(`[FidelityAction] Triggering download using ${label}`);
+    const el = isSelector ? page.locator(target).first() : target;
     
     if (!await el.isVisible({ timeout: 10000 })) {
-        throw new Error(`Download button not found or invisible: ${buttonSelector}`);
+        throw new Error(`Download button not found or invisible: ${label}`);
     }
 
     const [download] = await Promise.all([
@@ -84,13 +87,59 @@ class FidelityAction {
     ]);
 
     const suggestedName = download.suggestedFilename();
-    const destPath = path.join(this.options.downloadDir, suggestedName || 'fidelity-export.csv');
+    const destPath = this.buildDownloadPath(suggestedName);
     
+    fs.mkdirSync(this.options.downloadDir, { recursive: true });
     await download.saveAs(destPath);
     console.error(`[FidelityAction] Download captured: ${destPath}`);
 
     const content = fs.readFileSync(destPath, 'utf8');
     return { filePath: destPath, content };
+  }
+
+  buildDownloadPath(suggestedName) {
+    const extension = path.extname(suggestedName || '') || '.csv';
+    const prefix = this.sanitizeFilenamePart(this.options.exportFilePrefix || 'fidelity-export');
+    const dateStamp = this.getDateStamp(this.options.exportDate || new Date());
+    const basePath = path.join(this.options.downloadDir, `${prefix}-${dateStamp}${extension}`);
+
+    return this.uniquePath(basePath);
+  }
+
+  getDateStamp(date) {
+    const timeZone = this.options.exportTimeZone || 'America/Los_Angeles';
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(date instanceof Date ? date : new Date(date));
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${byType.year}-${byType.month}-${byType.day}`;
+  }
+
+  sanitizeFilenamePart(value) {
+    return String(value)
+      .trim()
+      .replace(/[^a-z0-9._-]+/gi, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase() || 'fidelity-export';
+  }
+
+  uniquePath(basePath) {
+    if (!fs.existsSync(basePath)) return basePath;
+
+    const extension = path.extname(basePath);
+    const stem = basePath.slice(0, -extension.length);
+    let index = 2;
+    let candidate = `${stem}-${index}${extension}`;
+
+    while (fs.existsSync(candidate)) {
+      index += 1;
+      candidate = `${stem}-${index}${extension}`;
+    }
+
+    return candidate;
   }
 }
 

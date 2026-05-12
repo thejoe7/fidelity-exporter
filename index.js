@@ -1,7 +1,11 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { FidelityBrowserFactory } = require('./core/FidelityBrowserFactory');
 const { FidelityAuthManager } = require('./core/FidelityAuthManager');
+const { loadFidelityConfig } = require('./core/FidelityCredentials');
 const { ExportPositionsAction } = require('./actions/ExportPositionsAction');
 
 /**
@@ -10,9 +14,23 @@ const { ExportPositionsAction } = require('./actions/ExportPositionsAction');
  */
 class FidelityExporter {
   constructor(options = {}) {
-    this.factory = new FidelityBrowserFactory(options);
-    this.auth = new FidelityAuthManager(options);
-    this.options = options;
+    const credentials = loadFidelityConfig(options);
+    const downloadDir = options.downloadDir || options.outDir || os.tmpdir();
+    this.options = {
+      timeout: 60000,
+      closeOnFinish: true,
+      ...options,
+      username: credentials.username,
+      password: credentials.password,
+      downloadDir,
+      outDir: options.outDir || downloadDir,
+      userDataDir: options.userDataDir || credentials.userDataDir,
+      browserChannel: options.browserChannel || credentials.browserChannel,
+      profileDirectory: options.profileDirectory || credentials.profileDirectory,
+      envFilePath: credentials.envFilePath
+    };
+    this.factory = new FidelityBrowserFactory(this.options);
+    this.auth = new FidelityAuthManager(this.options);
   }
 
   /**
@@ -20,10 +38,12 @@ class FidelityExporter {
    * Orchestrates the entire lifecycle.
    */
   async exportPositions() {
-    const page = await this.factory.getPage();
-    const action = new ExportPositionsAction(this.options);
+    let page;
 
     try {
+      page = await this.factory.getPage();
+      const action = new ExportPositionsAction(this.options);
+
       // Step 1: Perform authentication (with session persistence support)
       await this.auth.authenticate(page);
 
@@ -32,17 +52,18 @@ class FidelityExporter {
 
       return result;
     } catch (err) {
+      await this.captureDebugScreenshot(page).catch((screenshotErr) => {
+        console.error(`[FidelityExporter] Failed to save debug screenshot: ${screenshotErr.message}`);
+      });
       console.error(`[FidelityExporter] Error during action execution: ${err.message}`);
       throw err;
     } finally {
-      // FORCED INSPECTION: If visible, wait forever so user can see what happened
-      if (this.options.visible) {
-        console.error("[DEBUG] TASK FINISHED/FAILED. Browser will stay open for your inspection.");
-        console.error("[DEBUG] Check the window, then use Ctrl+C in this terminal to close.");
+      if (this.options.keepOpen) {
+        console.error('[FidelityExporter] Browser will stay open for inspection. Use Ctrl+C in this terminal to close it.');
         await new Promise(() => {}); 
       }
       
-      if (this.options.closeOnFinish !== false && !this.options.visible) {
+      if (this.options.closeOnFinish !== false) {
         await this.factory.close();
       }
     }
@@ -52,18 +73,44 @@ class FidelityExporter {
    * Expose methods for future actions.
    */
   async runAction(ActionClass) {
-    const page = await this.factory.getPage();
-    const action = new ActionClass(this.options);
+    let page;
 
     try {
+      page = await this.factory.getPage();
+      const action = new ActionClass(this.options);
+
       await this.auth.authenticate(page);
       return await action.execute(page);
+    } catch (err) {
+      await this.captureDebugScreenshot(page).catch((screenshotErr) => {
+        console.error(`[FidelityExporter] Failed to save debug screenshot: ${screenshotErr.message}`);
+      });
+      throw err;
     } finally {
+      if (this.options.keepOpen) {
+        console.error('[FidelityExporter] Browser will stay open for inspection. Use Ctrl+C in this terminal to close it.');
+        await new Promise(() => {});
+      }
+
       if (this.options.closeOnFinish !== false) {
         await this.factory.close();
       }
     }
   }
+
+  async captureDebugScreenshot(page) {
+    if (!this.options.debug || !page) return;
+
+    fs.mkdirSync(this.options.downloadDir, { recursive: true });
+    const screenshotPath = path.join(this.options.downloadDir, `fidelity-exporter-error-${Date.now()}.png`);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.error(`[FidelityExporter] Debug screenshot saved to: ${screenshotPath}`);
+  }
 }
 
-module.exports = { FidelityExporter };
+async function exportPositions(options = {}) {
+  const exporter = new FidelityExporter(options);
+  return exporter.exportPositions();
+}
+
+module.exports = { FidelityExporter, exportPositions };
